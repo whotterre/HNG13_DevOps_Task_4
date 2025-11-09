@@ -266,14 +266,6 @@ Contributions are welcome! If you'd like to improve `vpcctl`, please follow thes
 -   Push to the branch (`git push origin feature/AmazingFeature`).
 -   Open a Pull Request.
 
-## ✍️ Author
-
-**whotterre**
-
--   **Twitter**: [@your_twitter_handle](https://twitter.com/your_twitter_handle)
--   **LinkedIn**: [your-linkedin-profile](https://linkedin.com/in/your-linkedin-profile)
-
-<br>
 
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
