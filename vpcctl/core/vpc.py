@@ -4,6 +4,8 @@ from .utils import is_root, is_on_linux, get_hash, get_rand_int
 import logging
 import subprocess
 import ipaddress
+import os
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vpcctl.core.vpc")
@@ -113,7 +115,7 @@ def create_vpc(args: argparse.Namespace) -> int:
         logger.error("User must be root to create a VPC")
         return 1
 
-    bridge_name = "net-" + _short_hash(name, 11)
+    bridge_name = "br-" + _short_hash(name, 11)
 
     try:
         if _check_bridge_exists(bridge_name):
@@ -355,7 +357,6 @@ def create_vpc(args: argparse.Namespace) -> int:
         if "state UNKNOWN" not in result.stdout and "state UP" not in result.stdout:
             subprocess.run(["ip", "netns", "exec", private_ns, "ip", "link", "set", "lo", "up"], 
                          check=True, capture_output=True, text=True)
-
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.strip() if e.stderr else str(e)
         logger.error("Failed to configure namespaces: %s", stderr)
@@ -479,6 +480,26 @@ def create_vpc(args: argparse.Namespace) -> int:
         stderr = e.stderr.strip() if e.stderr else str(e)
         logger.error("Failed to configure FORWARD rules: %s", stderr)
         return 1
+
+    file_dir = "/var/lib/vpcctl"
+    file_name = os.path.join(file_dir, "vpcs.ndjson")
+    try:
+        os.makedirs(file_dir, exist_ok=True)
+        vpc_record = {
+            "name": name,
+            "bridge": bridge_name,
+            "public_ns": public_ns,
+            "private_ns": private_ns,
+            "public_subnet": str(public_subnet),
+            "private_subnet": str(private_subnet),
+            "interface": str(interface),
+            "bridge_ip": ip_str,
+        }
+        with open(file_name, "a", encoding="utf-8") as f:
+            f.write(json.dumps(vpc_record) + "\n")
+        logger.info("Stored VPC metadata to %s", file_name)
+    except Exception as e:
+        logger.warning("Unable to persist VPC metadata to %s: %s", file_name, str(e))
 
     logger.info("Successfully created VPC %s", name)
 
