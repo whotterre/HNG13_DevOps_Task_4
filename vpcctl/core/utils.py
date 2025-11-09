@@ -2,6 +2,7 @@
 import hashlib
 import os
 import platform
+import random
 
 def is_root() -> bool:
     """
@@ -29,3 +30,9 @@ def get_hash(value: str) -> str:
     md5_hash.update(value.encode('utf-8'))
 
     return md5_hash.hexdigest()
+
+def get_rand_int():
+    """
+    Gets a random integer 
+    """
+    return random.randint(0, 10000)

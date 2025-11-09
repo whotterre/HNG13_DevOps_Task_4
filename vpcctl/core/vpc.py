@@ -1,11 +1,18 @@
 import argparse
-from .utils import is_root, is_on_linux, get_hash
+from .utils import is_root, is_on_linux, get_hash, get_rand_int
 import logging
 import subprocess
 import ipaddress
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vpcctl.core.vpc")
+
+def _short_hash(s: str, max_len: int) -> str:
+    """
+    Truncates long hashes to prevent kernel policy violaion (char count must be < 15)
+    """
+    h = get_hash(s)
+    return h[:max_len]
 
 
 def create_vpc(args: argparse.Namespace) -> int:
@@ -52,7 +59,7 @@ def create_vpc(args: argparse.Namespace) -> int:
         return 1
 
     # Create a network bridge.
-    bridge_name = "net-" + get_hash(name)
+    bridge_name = "net-" + _short_hash(name, 11)
     cmd = ["ip", "link", "add", bridge_name, "type", "bridge"]
     logger.info("Creating bridge with name %s", bridge_name)
     try:
@@ -122,5 +129,114 @@ def create_vpc(args: argparse.Namespace) -> int:
         logger.error("Failed to assign IP or bring bridge up: %s", stderr)
         return 1
     
+    # Create network namespaces for the subnets
+    try:
+        private_ns = "vpc-pr-ns-" + _short_hash(name + str(get_rand_int(), 8))
+        subprocess.run(["ip", "netns", "add", private_ns], check=True, capture_output=True, text=True)
+        logger.info("Created network namespace for private subnet: %s", private_ns)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to create network namespace for private subnet: %s", stderr)
+        return 1
+
+    try:
+        public_ns = "vpc-pub-ns-" + _short_hash(name + str(get_rand_int(), 8))
+        subprocess.run(["ip", "netns", "add", public_ns], check=True, capture_output=True, text=True)
+        logger.info("Created network namespace for public subnet: %s", public_ns)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to create network namespace for public subnet: %s", stderr)
+        return 1
+
+    # Create veth pairs for public and private namespaces, attach host ends to bridge,
+    # move peer ends into their respective namespaces, then assign IPs and bring up links.
+    try:
+        veth_pub_host = "veth-" + _short_hash(name + "-pub-h", 10)
+        veth_pub_ns = "veth-" + _short_hash(name + "-pub-n", 10)
+        veth_pri_host = "veth-" + _short_hash(name + "-pri-h", 10)
+        veth_pri_ns = "veth-" + _short_hash(name + "-pri-n", 10)
+
+        # Create pairs
+        subprocess.run(["ip", "link", "add", veth_pub_host, "type", "veth", "peer", "name", veth_pub_ns], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "link", "add", veth_pri_host, "type", "veth", "peer", "name", veth_pri_ns], check=True, capture_output=True, text=True)
+
+        # Attach host ends to bridge and bring them up
+        subprocess.run(["ip", "link", "set", veth_pub_host, "master", bridge_name], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "link", "set", veth_pri_host, "master", bridge_name], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "link", "set", veth_pub_host, "up"], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "link", "set", veth_pri_host, "up"], check=True, capture_output=True, text=True)
+
+        # Move peer ends into namespaces
+        subprocess.run(["ip", "link", "set", veth_pub_ns, "netns", public_ns], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "link", "set", veth_pri_ns, "netns", private_ns], check=True, capture_output=True, text=True)
+
+        logger.info("Connected namespaces to bridge using: %s<->%s and %s<->%s", veth_pub_host, veth_pub_ns, veth_pri_host, veth_pri_ns)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to create/move veth pairs: %s", stderr)
+        return 1
+
+    # Choose IPs for the namespace interfaces from their subnet CIDRs
+    try:
+        pub_net = ipaddress.ip_network(public_subnet, strict=False)
+        pri_net = ipaddress.ip_network(private_subnet, strict=False)
+    except Exception as e:
+        logger.error("Invalid public/private subnet CIDR: %s %s", public_subnet, private_subnet)
+        return 1
+
+    pub_hosts = list(pub_net.hosts())
+    pri_hosts = list(pri_net.hosts())
+    if not pub_hosts or not pri_hosts:
+        logger.error("Public or private subnet has no usable hosts")
+        return 1
+
+    # Pick the first usable host in each subnet (avoid chosen_ip used on bridge)
+    def pick_first(net_hosts, avoid_ip):
+        for h in net_hosts:
+            if str(h) == str(avoid_ip):
+                continue
+            return h
+        return None
+
+    pub_ip = pick_first(pub_hosts, chosen_ip)
+    pri_ip = pick_first(pri_hosts, chosen_ip)
+    if pub_ip is None or pri_ip is None:
+        logger.error("Could not select namespace IPs that avoid the bridge IP")
+        return 1
+
+    pub_ip_str = f"{pub_ip}/{pub_net.prefixlen}"
+    pri_ip_str = f"{pri_ip}/{pri_net.prefixlen}"
+
+    # In dry-run, show the planned namespace configuration
+    if dry_run:
+        logger.info("DRY-RUN: would assign %s to %s inside namespace %s", pub_ip_str, veth_pub_ns, public_ns)
+        logger.info("DRY-RUN: would bring up lo and %s inside %s", veth_pub_ns, public_ns)
+        logger.info("DRY-RUN: would assign %s to %s inside namespace %s", pri_ip_str, veth_pri_ns, private_ns)
+        logger.info("DRY-RUN: would bring up lo and %s inside %s", veth_pri_ns, private_ns)
+        return 0
+
+    # Assign IPs inside namespaces and bring up loopback + veth interfaces
+    try:
+        subprocess.run(["ip", "netns", "exec", public_ns, "ip", "addr", "add", pub_ip_str, "dev", veth_pub_ns], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "netns", "exec", public_ns, "ip", "link", "set", veth_pub_ns, "up"], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "netns", "exec", public_ns, "ip", "link", "set", "lo", "up"], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "netns", "exec", private_ns, "ip", "addr", "add", pri_ip_str, "dev", veth_pri_ns], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "netns", "exec", private_ns, "ip", "link", "set", veth_pri_ns, "up"], check=True, capture_output=True, text=True)
+        subprocess.run(["ip", "netns", "exec", private_ns, "ip", "link", "set", "lo", "up"], check=True, capture_output=True, text=True)
+
+        logger.info("Assigned namespace IPs and brought up loopback + veth interfaces")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to configure namespaces: %s", stderr)
+        return 1
+    
+
+    
+
+
+    
+
+
+
 
     return 0
