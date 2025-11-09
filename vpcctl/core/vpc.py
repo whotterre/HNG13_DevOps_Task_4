@@ -134,7 +134,7 @@ def create_vpc(args: argparse.Namespace) -> int:
     
     # Create network namespaces for the subnets
     try:
-        private_ns = "vpc-pr-ns-" + _short_hash(name + str(get_rand_int(), 8))
+        private_ns = "vpc-pr-ns-" + _short_hash(name + str(get_rand_int()), 8)
         subprocess.run(["ip", "netns", "add", private_ns], check=True, capture_output=True, text=True)
         logger.info("Created network namespace for private subnet: %s", private_ns)
     except subprocess.CalledProcessError as e:
@@ -143,7 +143,7 @@ def create_vpc(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        public_ns = "vpc-pub-ns-" + _short_hash(name + str(get_rand_int(), 8))
+        public_ns = "vpc-pub-ns-" + _short_hash(name + str(get_rand_int()), 8)
         subprocess.run(["ip", "netns", "add", public_ns], check=True, capture_output=True, text=True)
         logger.info("Created network namespace for public subnet: %s", public_ns)
     except subprocess.CalledProcessError as e:
@@ -259,7 +259,45 @@ def create_vpc(args: argparse.Namespace) -> int:
         stderr = e.stderr.strip() if e.stderr else str(e)
         logger.error("Failed to enable IP forwarding for traffic from public subnet to the internet: %s...", stderr)
         return 1
+    
+    # By default, we need to allow access to ports 80, 443 and 22 for the public subnet.
+    try:
+        logger.info("Configuring FORWARD rules and allowing public ports (80,443,22)")
+        iface = str(interface)
+        pub_sub = str(public_subnet)
+
+        # Allow established/related from external into bridge
+        rule = ["iptables", "-C", "FORWARD", "-i", iface, "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"]
+        if subprocess.run(rule, capture_output=True).returncode != 0:
+            if dry_run:
+                logger.info("DRY-RUN: would run: %s", " ".join(rule).replace(' -C ', ' '))
+            else:
+                subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"], check=True)
+
+        # Allow forwarding from bridge to external
+        rule = ["iptables", "-C", "FORWARD", "-i", bridge_name, "-o", iface, "-j", "ACCEPT"]
+        if subprocess.run(rule, capture_output=True).returncode != 0:
+            if dry_run:
+                logger.info("DRY-RUN: would run: %s", " ".join(rule).replace(' -C ', ' '))
+            else:
+                subprocess.run(["iptables", "-A", "FORWARD", "-i", bridge_name, "-o", iface, "-j", "ACCEPT"], check=True)
+
+        # Allow inbound TCP to common public ports for addresses in public_subnet
+        ports_rule = ["iptables", "-C", "FORWARD", "-p", "tcp", "-d", pub_sub, "-m", "multiport", "--dports", "80,443,22", "-j", "ACCEPT"]
+        if subprocess.run(ports_rule, capture_output=True).returncode != 0:
+            if dry_run:
+                logger.info("DRY-RUN: would run: iptables -A FORWARD -p tcp -d %s -m multiport --dports 80,443,22 -j ACCEPT", pub_sub)
+            else:
+                subprocess.run(["iptables", "-A", "FORWARD", "-p", "tcp", "-d", pub_sub, "-m", "multiport", "--dports", "80,443,22", "-j", "ACCEPT"], check=True)
+
+        logger.info("Firewall FORWARD rules configured")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to configure FORWARD/firewall rules: %s", stderr)
+        return 1
 
 
-    logger.info("Done!")
+    logger.info("Successfully created VPC!", name + "\n")
+
     return 0
+
