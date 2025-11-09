@@ -510,7 +510,30 @@ def list_vpcs(args: argparse.Namespace = None) -> int:
 
     Accepts an optional argparse.Namespace to match the CLI handler signature.
     """
+    file_path = "/var/lib/vpcctl/vpcs.ndjson"
     try:
+        names = []
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        rec = json.loads(ln)
+                        nm = rec.get("name")
+                        if nm:
+                            names.append(nm)
+                    except Exception:
+                        logger.warning("Skipping malformed VPC record in %s", file_path)
+
+        if names:
+            print("Existing VPCs")
+            print("--------------")
+            for n in names:
+                print(n)
+            return 0
+
         result = subprocess.run(["ip", "link", "show", "type", "bridge"], check=True, capture_output=True, text=True)
         vpc_pattern = re.compile(r'^\d+:\s+([a-zA-Z0-9_-]+):', re.MULTILINE)
         vpcs = vpc_pattern.findall(result.stdout or "")
@@ -525,4 +548,7 @@ def list_vpcs(args: argparse.Namespace = None) -> int:
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.strip() if e.stderr else str(e)
         logger.error("Failed to fetch list of existing VPCs: %s", stderr)
+        return 1
+    except Exception as e:
+        logger.error("Unexpected error while listing VPCs: %s", str(e))
         return 1
