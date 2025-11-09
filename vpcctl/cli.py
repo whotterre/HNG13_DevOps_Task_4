@@ -45,11 +45,22 @@ def main():
     inspect_parser.add_argument("--name", required=True, help="Unique VPC name")
     inspect_parser.set_defaults(func=vpc.inspect_vpc)
     
+    # delete command - vpcctl delete
+    delete_parser = subparsers.add_parser(
+        "delete",
+        help="Deletes a VPC"
+    )
+    delete_parser.add_argument("--name", required=True, help="Unique VPC name")
+    delete_parser.set_defaults(func=vpc.delete_vpc)
+    
+    
     args = parser.parse_args()
     if hasattr(args, "func"):
         return_code = args.func(args)
         return 0 if return_code is None else return_code
-
+    
+  
+    
     return 1
 
 

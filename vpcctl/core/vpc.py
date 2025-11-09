@@ -617,4 +617,132 @@ def inspect_vpc(args: argparse.Namespace = None) -> int:
         logger.exception("Unexpected error while inspecting VPC %s", vpc_name)
         return 1
     
-    
+def delete_vpc(args: argparse.Namespace = None) -> int:
+    """Deletes a VPC with specified name"""
+    vpc_name = str(getattr(args, "name"))
+    if not vpc_name:
+       logger.error("VPC name must be passed as an argument. Try vpcctl delete <vpc_name>")
+       return 1
+    logger.info("Deleting VPC %s", vpc_name)
+
+    # Load the persisted record so we can target exact names
+    vpc_list_file_path = "/var/lib/vpcctl/vpcs.ndjson"
+    record = None
+    try:
+        if os.path.exists(vpc_list_file_path):
+            with open(vpc_list_file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        obj = json.loads(l)
+                    except Exception:
+                        continue
+                    if obj.get("name") == vpc_name:
+                        record = obj
+                        break
+    except Exception as e:
+        logger.warning("Failed to read persisted VPC metadata: %s", str(e))
+
+    # Derive names/values: prefer persisted record, fallback to deterministic names
+    bridge_name = record.get("bridge") if record and record.get("bridge") else "br-" + _short_hash(vpc_name, 11)
+    public_ns = record.get("public_ns") if record and record.get("public_ns") else None
+    private_ns = record.get("private_ns") if record and record.get("private_ns") else None
+    interface = record.get("interface") if record and record.get("interface") else None
+    public_subnet = record.get("public_subnet") if record and record.get("public_subnet") else None
+
+    # Host-side veth names are deterministic from creation code
+    veth_pub_host = "veth-" + _short_hash(vpc_name + "-pub-h", 10)
+    veth_pri_host = "veth-" + _short_hash(vpc_name + "-pri-h", 10)
+
+    # Remove iptables rules that were added during creation
+    try:
+        if interface and public_subnet:
+            # NAT rule
+            nat_rule = ["-s", str(public_subnet), "-o", str(interface), "-j", "MASQUERADE"]
+            if _check_iptables_rule_exists("nat", "POSTROUTING", nat_rule):
+                subprocess.run(["iptables", "-t", "nat", "-D", "POSTROUTING"] + nat_rule, check=True)
+                logger.info("Removed NAT POSTROUTING rule for %s via %s", public_subnet, interface)
+
+            # FORWARD rules (best-effort removals)
+            fwd1 = ["-i", str(interface), "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"]
+            if _check_iptables_rule_exists("filter", "FORWARD", fwd1):
+                subprocess.run(["iptables", "-D", "FORWARD"] + fwd1, check=True)
+                logger.info("Removed FORWARD rule for established connections")
+
+            fwd2 = ["-i", bridge_name, "-o", str(interface), "-j", "ACCEPT"]
+            if _check_iptables_rule_exists("filter", "FORWARD", fwd2):
+                subprocess.run(["iptables", "-D", "FORWARD"] + fwd2, check=True)
+                logger.info("Removed FORWARD rule from bridge to interface")
+
+            fwd3 = ["-p", "tcp", "-d", str(public_subnet), "-m", "multiport", "--dports", "80,443,22", "-j", "ACCEPT"]
+            if _check_iptables_rule_exists("filter", "FORWARD", fwd3):
+                subprocess.run(["iptables", "-D", "FORWARD"] + fwd3, check=True)
+                logger.info("Removed FORWARD rule for ports 80,443,22")
+    except subprocess.CalledProcessError as e:
+        logger.warning("Some iptables removals failed: %s", str(e))
+
+    # Delete network namespaces (if present)
+    for ns in (public_ns, private_ns):
+        if not ns:
+            continue
+        try:
+            if _check_netns_exists(ns):
+                subprocess.run(["ip", "netns", "delete", ns], check=True)
+                logger.info("Deleted network namespace %s", ns)
+            else:
+                logger.debug("Network namespace %s not present", ns)
+        except subprocess.CalledProcessError as e:
+            logger.warning("Failed to delete netns %s: %s", ns, str(e))
+
+    # Delete host veth interfaces if they exist
+    for vh in (veth_pub_host, veth_pri_host):
+        try:
+            if _check_veth_exists(vh):
+                subprocess.run(["ip", "link", "delete", vh, "type", "veth"], check=True)
+                logger.info("Deleted veth %s", vh)
+            else:
+                logger.debug("Veth %s not present on host", vh)
+        except subprocess.CalledProcessError as e:
+            logger.warning("Failed to delete veth %s: %s", vh, str(e))
+
+    # Delete bridge if present
+    try:
+        if _check_bridge_exists(bridge_name):
+            subprocess.run(["ip", "link", "delete", bridge_name, "type", "bridge"], check=True)
+            logger.info("Deleted bridge %s", bridge_name)
+        else:
+            logger.debug("Bridge %s not present", bridge_name)
+    except subprocess.CalledProcessError as e:
+        logger.warning("Failed to delete bridge %s: %s", bridge_name, str(e))
+
+    # Remove persisted NDJSON entry (write back all records except the matching one)
+    try:
+        if os.path.exists(vpc_list_file_path):
+            kept = []
+            with open(vpc_list_file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped_line = line.strip()
+                    if not stripped_line:
+                        continue
+                    try:
+                        obj = json.loads(stripped_line)
+                    except Exception:
+                        # keep malformed lines as-is to avoid accidental loss
+                        kept.append(line)
+                        continue
+                    if obj.get("name") != vpc_name:
+                        kept.append(line)
+
+            # Atomic replace
+            tmp_path = vpc_list_file_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as out:
+                out.writelines(kept)
+            os.replace(tmp_path, vpc_list_file_path)
+            logger.info("Removed VPC record %s from %s", vpc_name, vpc_list_file_path)
+    except Exception as e:
+        logger.warning("Failed to update persisted VPC metadata: %s", str(e))
+
+    logger.info("Finished deletion attempt for VPC %s", vpc_name)
+    return 0
