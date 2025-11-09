@@ -552,3 +552,69 @@ def list_vpcs(args: argparse.Namespace = None) -> int:
     except Exception as e:
         logger.error("Unexpected error while listing VPCs: %s", str(e))
         return 1
+
+def inspect_vpc(args: argparse.Namespace = None) -> int:
+    """
+    Shows information about an existing VPC 
+    <vpc_name> - name of the VPC you want to spy on
+    """
+    
+    # Ensure name argument is passed
+    vpc_name = str(getattr(args, "name"))
+    if not vpc_name:
+       logger.error("VPC name must be passed as an argument. Try vpcctl inspect <vpc_name>")
+       return 1
+    
+    try:
+        logger.info("Inspecting VPC %s\n", vpc_name)
+        vpc_list_file_path = "/var/lib/vpcctl/vpcs.ndjson"
+
+        if os.path.exists(vpc_list_file_path):
+            with open(vpc_list_file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        logger.warning("Skipping malformed VPC record in %s", vpc_list_file_path)
+                        continue
+
+                    if rec.get("name") == vpc_name:
+                        print(f"{vpc_name} details \n")
+                        deet_dict = {
+                            "name": "Name",
+                            "bridge": "Bridge",
+                            "public_ns": "Public Namespace",
+                            "private_ns": "Private Namespace",
+                            "public_subnet":  "Public Subnet",
+                            "private_subnet": "Private Subnet",
+                            "interface": "Interface",
+                             "bridge_ip": "Bridge IP",
+                            }
+                        for key, val in deet_dict.items():
+                            if rec.get(key):
+                               print(f"{val}: {rec[key]}\n")
+                    
+                        return 0
+
+        result = subprocess.run(["ip", "link", "show", "type", "bridge"], check=True, capture_output=True, text=True)
+        vpc_pattern = re.compile(r'^\d+:\s+([a-zA-Z0-9_-]+):', re.MULTILINE)
+        vpcs = vpc_pattern.findall(result.stdout or "")
+        if vpc_name in vpcs:
+            bridge_out = subprocess.run(["ip", "link", "show", vpc_name], check=True, capture_output=True, text=True)
+            print(bridge_out.stdout)
+            return 0
+
+        logger.error("VPC named '%s' not found", vpc_name)
+        return 1
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Command failed while inspecting VPC: %s", stderr)
+        return 1
+    except Exception:
+        logger.exception("Unexpected error while inspecting VPC %s", vpc_name)
+        return 1
+    
+    

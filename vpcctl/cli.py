@@ -29,6 +29,7 @@ def main():
     create_parser.add_argument("--interface", required=True, help="Host's outbound network interface")
     create_parser.add_argument("--dry-run", action="store_true", help="Show planned actions without making system changes")
     create_parser.set_defaults(func=vpc.create_vpc)
+    
     # list command - vpcctl list
     list_parser = subparsers.add_parser(
         "list",
@@ -36,12 +37,19 @@ def main():
     )
     list_parser.set_defaults(func=vpc.list_vpcs)
 
+    # inspect command - vpcctl inspect <name>
+    inspect_parser = subparsers.add_parser(
+        "inspect",
+        help="Displays detailed info for one VPC — kinda like `aws ec2 describe-vpcs.`"
+    )
+    inspect_parser.add_argument("--name", required=True, help="Unique VPC name")
+    inspect_parser.set_defaults(func=vpc.inspect_vpc)
+    
     args = parser.parse_args()
     if hasattr(args, "func"):
         return_code = args.func(args)
         return 0 if return_code is None else return_code
 
-    parser.print_help()
     return 1
 
 
