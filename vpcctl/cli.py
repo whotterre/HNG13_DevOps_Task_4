@@ -1,13 +1,8 @@
 import argparse
 import sys
-# Support both package-style execution (python -m vpcctl.cli) which uses
-# relative imports, and direct script execution (python cli.py) which does
-# not have a parent package. Try the relative import first, fall back to a
-# local absolute import when running as a script from the `vpcctl` directory.
 try:
     from .core import vpc
 except Exception:
-    # Running `python cli.py` inside the vpcctl/ directory: import core directly
     from core import vpc
 
 
@@ -34,12 +29,17 @@ def main():
     create_parser.add_argument("--interface", required=True, help="Host's outbound network interface")
     create_parser.add_argument("--dry-run", action="store_true", help="Show planned actions without making system changes")
     create_parser.set_defaults(func=vpc.create_vpc)
+    # list command - vpcctl list
+    list_parser = subparsers.add_parser(
+        "list",
+        help="Lists existing VPCs"
+    )
+    list_parser.set_defaults(func=vpc.list_vpcs)
 
     args = parser.parse_args()
     if hasattr(args, "func"):
-        # Call the subcommand handler. Handlers should return an int exit code (0 success), or None.
-        rc = args.func(args)
-        return 0 if rc is None else rc
+        return_code = args.func(args)
+        return 0 if return_code is None else return_code
 
     parser.print_help()
     return 1

@@ -1,4 +1,5 @@
 import argparse
+import re
 from .utils import is_root, is_on_linux, get_hash, get_rand_int
 import logging
 import subprocess
@@ -482,3 +483,25 @@ def create_vpc(args: argparse.Namespace) -> int:
     logger.info("Successfully created VPC %s", name)
 
     return 0
+
+def list_vpcs(args: argparse.Namespace = None) -> int:
+    """Lists existing VPCs
+
+    Accepts an optional argparse.Namespace to match the CLI handler signature.
+    """
+    try:
+        result = subprocess.run(["ip", "link", "show", "type", "bridge"], check=True, capture_output=True, text=True)
+        vpc_pattern = re.compile(r'^\d+:\s+([a-zA-Z0-9_-]+):', re.MULTILINE)
+        vpcs = vpc_pattern.findall(result.stdout or "")
+        if not vpcs:
+            print("No existing VPCs.")
+            return 0
+        print("Existing VPCs")
+        print("--------------")
+        for vpc in list(vpcs):
+            print(vpc)
+        return 0
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to fetch list of existing VPCs: %s", stderr)
+        return 1
