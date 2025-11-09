@@ -623,7 +623,7 @@ def delete_vpc(args: argparse.Namespace = None) -> int:
     if not vpc_name:
        logger.error("VPC name must be passed as an argument. Try vpcctl delete <vpc_name>")
        return 1
-    logger.info("Deleting VPC %s", vpc_name)
+    logger.info("Attempting to delete VPC %s", vpc_name)
 
     # Load the persisted record so we can target exact names
     vpc_list_file_path = "/var/lib/vpcctl/vpcs.ndjson"
@@ -632,11 +632,11 @@ def delete_vpc(args: argparse.Namespace = None) -> int:
         if os.path.exists(vpc_list_file_path):
             with open(vpc_list_file_path, "r", encoding="utf-8") as f:
                 for line in f:
-                    line = ln.strip()
-                    if not ln:
+                    stripped_line = line.strip()
+                    if not stripped_line:
                         continue
                     try:
-                        obj = json.loads(l)
+                        obj = json.loads(stripped_line)
                     except Exception:
                         continue
                     if obj.get("name") == vpc_name:
