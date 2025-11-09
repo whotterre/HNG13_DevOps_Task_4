@@ -42,6 +42,9 @@ def create_vpc(args: argparse.Namespace) -> int:
     if not private_subnet:
         logger.error("Private subnet value must be provided")
         return 1
+    if not interface:
+       logger.error("Interface value must be provided")
+       return 1
 
     logger.info("Preparing to create VPC %s", name)
 
@@ -229,14 +232,34 @@ def create_vpc(args: argparse.Namespace) -> int:
         stderr = e.stderr.strip() if e.stderr else str(e)
         logger.error("Failed to configure namespaces: %s", stderr)
         return 1
-    
 
-    
+    # Routing part     
+    # Set bridge's IP as default route
+    try:
+        logger.info("Setting bridge IP as default route")
+        subprocess.run(["ip", "netns", "exec", public_ns, "ip", "route", "add", "default", "via", chosen_ip], check=True)
+        subprocess.run(["ip", "netns", "exec", private_ns, "ip", "route", "add", "default", "via", chosen_ip], check=True)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to set bridge IP as default route: %s", stderr)
+        return 1
+
+    # Enable IP forwarding to allow traffic from public subnet to the internet
+    try:
+        interface = str(interface)
+        logger.info("Enable IP forwarding for traffic from public subnet to the internet....")
+        subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=True)
+        # Check if NAT rule already exists before adding
+        rule_check = subprocess.run(["iptables", "-t", "nat", "-C", "POSTROUTING","-s", str(public_subnet), "-o", str(interface), "-j", "MASQUERADE"], capture_output=True)
+        if rule_check.returncode != 0:
+           subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", str(public_subnet), "-o", str(interface), "-j", "MASQUERADE"], check=True)
+
+        logger.info("Successfully enabled IP forwarding for traffic from public subnet to the internet")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to enable IP forwarding for traffic from public subnet to the internet: %s...", stderr)
+        return 1
 
 
-    
-
-
-
-
+    logger.info("Done!")
     return 0
