@@ -53,6 +53,26 @@ def main():
     delete_parser.add_argument("--name", required=True, help="Unique VPC name")
     delete_parser.set_defaults(func=vpc.delete_vpc)
     
+    # peer command - vpcctl peer
+    peer_parser = subparsers.add_parser(
+        "peer",
+        help="Peer two VPCs by connecting their bridges and adding static routes"
+    )
+    peer_parser.add_argument("--vpc1", required=True, help="First VPC name")
+    peer_parser.add_argument("--vpc2", required=True, help="Second VPC name")
+    peer_parser.add_argument("--dry-run", action="store_true", help="Show planned actions without making system changes")
+    peer_parser.set_defaults(func=vpc.peer_vpcs)
+    
+    # unpeer command - vpcctl unpeer
+    unpeer_parser = subparsers.add_parser(
+        "unpeer",
+        help="Remove peering between two VPCs"
+    )
+    unpeer_parser.add_argument("--vpc1", required=True, help="First VPC name")
+    unpeer_parser.add_argument("--vpc2", required=True, help="Second VPC name")
+    unpeer_parser.add_argument("--dry-run", action="store_true", help="Show planned actions without making system changes")
+    unpeer_parser.set_defaults(func=vpc.unpeer_vpcs)
+    
     
     args = parser.parse_args()
     if hasattr(args, "func"):
