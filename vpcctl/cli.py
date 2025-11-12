@@ -73,6 +73,17 @@ def main():
     unpeer_parser.add_argument("--dry-run", action="store_true", help="Show planned actions without making system changes")
     unpeer_parser.set_defaults(func=vpc.unpeer_vpcs)
     
+    # apply-policy command - vpcctl apply-policy
+    apply_policy_parser = subparsers.add_parser(
+        "apply-policy",
+        help="Apply firewall policy rules to a VPC subnet from a JSON file"
+    )
+    apply_policy_parser.add_argument("--name", required=True, help="VPC name")
+    apply_policy_parser.add_argument("--subnet", required=True, choices=['public', 'private'], help="Subnet type (public or private)")
+    apply_policy_parser.add_argument("--policy", required=True, help="Path to policy JSON file")
+    apply_policy_parser.add_argument("--dry-run", action="store_true", help="Show planned actions without making system changes")
+    apply_policy_parser.set_defaults(func=vpc.apply_policy)
+    
     
     args = parser.parse_args()
     if hasattr(args, "func"):
