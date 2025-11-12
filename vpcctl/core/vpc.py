@@ -301,21 +301,42 @@ def create_vpc(args: argparse.Namespace) -> int:
         logger.error("Public or private subnet has no usable hosts")
         return 1
 
-    def pick_first(net_hosts, avoid_ip):
-        for h in net_hosts:
-            if str(h) == str(avoid_ip):
-                continue
-            return h
-        return None
-
-    pub_ip = pick_first(pub_hosts, chosen_ip)
-    pri_ip = pick_first(pri_hosts, chosen_ip)
-    if pub_ip is None or pri_ip is None:
-        logger.error("Could not select namespace IPs that avoid the bridge IP")
+    # First IP of each subnet will be the gateway (assigned to bridge)
+    # Second IP will be assigned to the namespace interface
+    pub_gateway = pub_hosts[0] if len(pub_hosts) > 0 else None
+    pri_gateway = pri_hosts[0] if len(pri_hosts) > 0 else None
+    
+    pub_ip = pub_hosts[1] if len(pub_hosts) > 1 else None
+    pri_ip = pri_hosts[1] if len(pri_hosts) > 1 else None
+    
+    if pub_gateway is None or pri_gateway is None or pub_ip is None or pri_ip is None:
+        logger.error("Subnets must have at least 2 usable host IPs each")
         return 1
 
+    pub_gateway_str = f"{pub_gateway}/{pub_net.prefixlen}"
+    pri_gateway_str = f"{pri_gateway}/{pri_net.prefixlen}"
     pub_ip_str = f"{pub_ip}/{pub_net.prefixlen}"
     pri_ip_str = f"{pri_ip}/{pri_net.prefixlen}"
+
+    # Assign gateway IPs to bridge (these will be the default gateways for namespaces)
+    try:
+        if not _check_ip_on_interface(bridge_name, pub_gateway_str):
+            subprocess.run(["ip", "addr", "add", pub_gateway_str, "dev", bridge_name], 
+                         check=True, capture_output=True, text=True)
+            logger.info("Assigned public subnet gateway %s to bridge %s", pub_gateway_str, bridge_name)
+        else:
+            logger.info("Public gateway IP %s already on bridge", pub_gateway_str)
+        
+        if not _check_ip_on_interface(bridge_name, pri_gateway_str):
+            subprocess.run(["ip", "addr", "add", pri_gateway_str, "dev", bridge_name], 
+                         check=True, capture_output=True, text=True)
+            logger.info("Assigned private subnet gateway %s to bridge %s", pri_gateway_str, bridge_name)
+        else:
+            logger.info("Private gateway IP %s already on bridge", pri_gateway_str)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.error("Failed to assign gateway IPs to bridge: %s", stderr)
+        return 1
 
     try:
         if not _check_ip_in_netns(public_ns, veth_pub_ns, pub_ip_str):
@@ -365,9 +386,9 @@ def create_vpc(args: argparse.Namespace) -> int:
     try:
         logger.info("Configuring default routes in namespaces")
 
-        def _maybe_add_default(ns: str, peer_if: str):
-            # If default already exists via chosen_ip, skip
-            if _check_route_in_netns(ns, str(chosen_ip)):
+        def _maybe_add_default(ns: str, peer_if: str, gateway: str):
+            # If default already exists via gateway, skip
+            if _check_route_in_netns(ns, gateway):
                 logger.info("Default route already exists in %s", ns)
                 return
 
@@ -376,48 +397,32 @@ def create_vpc(args: argparse.Namespace) -> int:
                 logger.warning("Expected interface %s not present in namespace %s; skipping default route setup", peer_if, ns)
                 return
 
-            # First attempt: add default via gateway
-            add_cmd = ["ip", "netns", "exec", ns, "ip", "route", "add", "default", "via", str(chosen_ip)]
+            # Add default route via the bridge IP (gateway)
+            add_cmd = ["ip", "netns", "exec", ns, "ip", "route", "add", "default", "via", gateway]
             try:
                 subprocess.run(add_cmd, check=True, capture_output=True, text=True)
-                logger.info("Set default route in %s via %s", ns, chosen_ip)
+                logger.info("Set default route in %s via %s", ns, gateway)
                 return
             except subprocess.CalledProcessError as e:
                 out = (e.stderr or e.stdout or "").strip()
-                logger.warning("Failed to add default via %s in %s: %s", chosen_ip, ns, out)
+                logger.warning("Failed to add default via %s in %s: %s", gateway, ns, out)
 
-            # If adding via gateway failed due to gateway not on-link, add a host route to gateway via the device
-            gw_route_cmd = ["ip", "netns", "exec", ns, "ip", "route", "add", str(chosen_ip), "dev", peer_if]
-            try:
-                subprocess.run(gw_route_cmd, check=True, capture_output=True, text=True)
-                logger.info("Added route to gateway %s dev %s in %s", chosen_ip, peer_if, ns)
-            except subprocess.CalledProcessError:
-                logger.warning("Could not add host route to gateway %s in %s; will try dev-only default", chosen_ip, ns)
-
-            # Try adding default via gateway again
-            try:
-                subprocess.run(add_cmd, check=True, capture_output=True, text=True)
-                logger.info("Set default route in %s via %s after adding host route", ns, chosen_ip)
-                return
-            except subprocess.CalledProcessError as e2:
-                out2 = (e2.stderr or e2.stdout or "").strip()
-                logger.warning("Second attempt to add default via %s failed in %s: %s", chosen_ip, ns, out2)
-
-            # As a last resort, add a dev-only default route
+            # If adding via gateway failed, try dev-only default route
             dev_default_cmd = ["ip", "netns", "exec", ns, "ip", "route", "add", "default", "dev", peer_if]
             try:
                 subprocess.run(dev_default_cmd, check=True, capture_output=True, text=True)
                 logger.info("Added dev-only default route in %s via dev %s", ns, peer_if)
                 return
-            except subprocess.CalledProcessError as e3:
-                out3 = (e3.stderr or e3.stdout or "").strip()
-                logger.warning("Failed to add dev-only default in %s: %s", ns, out3)
+            except subprocess.CalledProcessError as e2:
+                out2 = (e2.stderr or e2.stdout or "").strip()
+                logger.warning("Failed to add dev-only default in %s: %s", ns, out2)
 
             logger.error("Unable to configure a default route in %s; manual intervention may be required", ns)
 
-        # Map namespace to its peer interface name
-        _maybe_add_default(public_ns, veth_pub_ns)
-        _maybe_add_default(private_ns, veth_pri_ns)
+        # Map namespace to its peer interface name and gateway (bridge IP in that subnet)
+        # The gateway must be the bridge IP which is reachable from the namespace
+        _maybe_add_default(public_ns, veth_pub_ns, str(pub_gateway))
+        _maybe_add_default(private_ns, veth_pri_ns, str(pri_gateway))
 
     except Exception as e:
         logger.error("Unexpected error while setting default routes: %s", str(e))
